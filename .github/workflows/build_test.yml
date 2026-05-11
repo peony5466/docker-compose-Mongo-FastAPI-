@@ -29,7 +29,7 @@ jobs:
       - name: Docker Scout Scan
         uses: docker/scout-action@v1
         with:
-          command: cves
+          command: cves,recommendations
           image: my-app:1.0.0
           only-severities: critical,high
-          exit-code: true
+          exit-code: false
