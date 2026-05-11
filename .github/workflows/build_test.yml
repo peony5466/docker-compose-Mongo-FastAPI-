@@ -76,7 +76,7 @@ jobs:
         run: |
           for i in $(seq 1 24); do
             echo "Tentative $i/24"
-            STATUSES=$(docker compose ps --format json | jq -r '.[].Health' 2>/dev/null)
+            STATUSES=$(docker compose ps --format json | jq -r 'if type=="array" then .[].Health else .Health end' 2>/dev/null || echo "starting")
             echo "$STATUSES"
             if echo "$STATUSES" | grep -qE "starting|unhealthy"; then
               sleep 5
