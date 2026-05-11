@@ -24,26 +24,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build image for scanning
+      - name: Build image API FastAPI
         run: docker build -t my-app:1.0.0 -f ./api/Dockerfile ./api
 
-      - name: Docker Scout Scan
+      - name: Docker Scout Scan - bloque si CRITICAL
         uses: docker/scout-action@v1
         with:
           command: cves,recommendations
           image: my-app:1.0.0
-          only-severities: critical,high
-          exit-code: false
+          only-severities: critical
+          exit-code: true
 
-      - name: Trivy scan mongo
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: mongo:6.0
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: 0
-
-      - name: Trivy scan mysql
+      - name: Trivy scan mysql - rapport uniquement sans bloquer
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: mysql:8.0
@@ -59,7 +51,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Générer le fichier .env
+      - name: Générer le fichier .env depuis les secrets GitHub
         run: |
           cat <<EOF > .env
           MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
@@ -68,45 +60,78 @@ jobs:
           MONGO_ROOT_PASSWORD=${{ secrets.MONGO_INITDB_ROOT_PASSWORD }}
           MONGO_URI=mongodb://root:${{ secrets.MONGO_INITDB_ROOT_PASSWORD }}@db_mongo:27017/?authSource=admin
           EOF
+          echo "Fichier .env généré avec succès"
 
-      - name: Lancer la stack
-        run: docker compose up -d --build
-
-      - name: Attendre que les services soient healthy
+      - name: Lancer la stack Docker Compose
         run: |
-          for i in $(seq 1 24); do
-            echo "Tentative $i/24"
+          echo "=== LANCEMENT DE LA STACK ==="
+          docker compose up -d --build
+          echo "Stack lancée"
+
+      - name: Script de santé - attendre que tous les services soient healthy
+        run: |
+          echo "=== DEBUT DU HEALTHCHECK ==="
+          MAX=12
+          WAIT=5
+          echo "Stratégie : $MAX tentatives toutes les ${WAIT}s (max $((MAX * WAIT))s)"
+
+          for i in $(seq 1 $MAX); do
+            echo "--- Tentative $i / $MAX ---"
+
             STATUSES=$(docker compose ps --format json | jq -r 'if type=="array" then .[].Health else .Health end' 2>/dev/null || echo "starting")
-            echo "$STATUSES"
+            echo "Statuts actuels : $STATUSES"
+
             if echo "$STATUSES" | grep -qE "starting|unhealthy"; then
-              sleep 5
+              echo "Services pas encore prêts, attente ${WAIT}s..."
+              sleep $WAIT
               continue
             fi
+
             HEALTHY=$(echo "$STATUSES" | grep -c "healthy" || true)
+            echo "Nombre de services healthy : $HEALTHY"
+
             if [ "$HEALTHY" -ge 3 ]; then
-              echo "Tous les services sont healthy"
+              echo "=== TOUS LES SERVICES SONT HEALTHY ==="
               docker compose ps
               exit 0
             fi
-            sleep 5
+
+            echo "Pas assez de services healthy, attente ${WAIT}s..."
+            sleep $WAIT
           done
-          echo "Timeout"
+
+          echo "=== TIMEOUT : services non healthy apres $((MAX * WAIT))s ==="
+          docker compose ps
           docker compose logs
           exit 1
 
-      - name: Test route /posts
+      - name: Validation fonctionnelle - GET /posts (MongoDB)
         run: |
+          echo "=== TEST CURL /posts ==="
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/posts)
-          echo "HTTP /posts : $STATUS"
-          [ "$STATUS" = "200" ] || exit 1
+          echo "HTTP status /posts : $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ /posts OK - MongoDB répond correctement"
+            curl -s http://localhost:8000/posts
+          else
+            echo "❌ /posts KO - status $STATUS"
+            exit 1
+          fi
 
-      - name: Test route /users
+      - name: Validation fonctionnelle - GET /users (MySQL)
         run: |
+          echo "=== TEST CURL /users ==="
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/users)
-          echo "HTTP /users : $STATUS"
-          [ "$STATUS" = "200" ] || exit 1
+          echo "HTTP status /users : $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ /users OK - MySQL répond correctement"
+            curl -s http://localhost:8000/users
+          else
+            echo "❌ /users KO - status $STATUS"
+            exit 1
+          fi
 
-      - name: Logs si echec
+      - name: Logs complets en cas d echec
         if: failure()
         run: docker compose logs
 
@@ -127,7 +152,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build et Push
+      - name: Build et Push image finale sur Docker Hub tag latest
         uses: docker/build-push-action@v5
         with:
           context: ./api
